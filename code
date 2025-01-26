@@ -3,100 +3,106 @@ import os
 import socket
 from multiprocessing import Process
 
-TAM_MSG = 1024         # Tamanho do bloco de mensagem
-HOST = '0.0.0.0'       # IP de alguma interface do Servidor
-PORT = 40000           # Porta que o Servidor escuta
+TAM_MSG = 1024  # Tamanho do bloco de mensagem
+HOST = '0.0.0.0'  # Escuta em todas as interfaces
+PORT = 40000  # Porta de comunicação
 
-def processa_msg_cliente(msg, con, cliente, dir_trabalho):
+def processa_comando(msg, con, cliente, dir_trabalho):
     """
-    Processa uma mensagem recebida de um cliente, executando comandos do protocolo BTP.
+    Processa um comando recebido de um cliente e retorna o status da conexão.
     """
     msg = msg.decode().strip()
     print(f'Cliente {cliente} enviou: {msg}')
-    msg = msg.split()
-    comando = msg[0].upper()
+    comandos = msg.split()
+    comando = comandos[0].upper() if comandos else ""
 
-    if comando == 'GET':  # Solicita um arquivo
-        nome_arq = os.path.join(dir_trabalho, " ".join(msg[1:]))
-        print(f'Arquivo solicitado: {nome_arq}')
+    if comando == 'LS':  # Lista arquivos no diretório atual
         try:
-            status_arq = os.stat(nome_arq)
-            con.send(str.encode(f'+OK {status_arq.st_size}\n'))
-            with open(nome_arq, "rb") as arq:
-                while True:
-                    dados = arq.read(TAM_MSG)
-                    if not dados:
-                        break
-                    con.send(dados)
+            arquivos = os.listdir(dir_trabalho)
+            con.send(str.encode(f'+OK {len(arquivos)}\n'))
+            for arquivo in arquivos:
+                caminho = os.path.join(dir_trabalho, arquivo)
+                if os.path.isfile(caminho):
+                    tamanho = os.path.getsize(caminho)
+                    con.send(str.encode(f'arq: {arquivo} - {tamanho / 1024:.1f}KB\n'))
+                elif os.path.isdir(caminho):
+                    con.send(str.encode(f'dir: {arquivo}\n'))
+                else:
+                    con.send(str.encode(f'esp: {arquivo}\n'))
         except Exception as e:
             con.send(str.encode(f'-ERR {e}\n'))
 
-    elif comando == 'LIST':  # Lista arquivos no diretório atual
-        lista_arq = os.listdir(dir_trabalho)
-        con.send(str.encode(f'+OK {len(lista_arq)}\n'))
-        for nome_arq in lista_arq:
-            caminho = os.path.join(dir_trabalho, nome_arq)
-            if os.path.isfile(caminho):
-                status_arq = os.stat(caminho)
-                con.send(str.encode(f'arq: {nome_arq} - {status_arq.st_size / 1024:.1f}KB\n'))
-            elif os.path.isdir(caminho):
-                con.send(str.encode(f'dir: {nome_arq}\n'))
-            else:
-                con.send(str.encode(f'esp: {nome_arq}\n'))
+    elif comando == 'GET':  # Envia um arquivo para o cliente
+        if len(comandos) < 2:
+            con.send(str.encode('-ERR Missing file name\n'))
+        else:
+            arquivo = os.path.join(dir_trabalho, comandos[1])
+            try:
+                with open(arquivo, 'rb') as f:
+                    tamanho = os.path.getsize(arquivo)
+                    con.send(str.encode(f'+OK {tamanho}\n'))
+                    while chunk := f.read(TAM_MSG):
+                        con.send(chunk)
+            except Exception as e:
+                con.send(str.encode(f'-ERR {e}\n'))
 
-    elif comando == 'CWD':  # Altera o diretório de trabalho (função do BTP)
-        if len(msg) < 2:
+    elif comando == 'CWD':  # Muda o diretório de trabalho
+        if len(comandos) < 2:
             con.send(str.encode('-ERR Missing directory\n'))
         else:
-            novo_diretorio = os.path.join(dir_trabalho, " ".join(msg[1:]))
-            if os.path.isdir(novo_diretorio):
-                dir_trabalho[0] = novo_diretorio
-                con.send(str.encode(f'+OK Changed directory to {novo_diretorio}\n'))
+            novo_dir = os.path.join(dir_trabalho, comandos[1])
+            if os.path.isdir(novo_dir):
+                dir_trabalho = novo_dir
+                con.send(str.encode(f'+OK {novo_dir}\n'))
             else:
-                con.send(str.encode(f'-ERR Directory not found: {novo_diretorio}\n'))
+                con.send(str.encode(f'-ERR Directory not found: {novo_dir}\n'))
 
-    elif comando == 'QUIT':  # Encerra a conexão
-        con.send(str.encode('+OK\n'))
-        return False
+    elif comando == 'EXIT':  # Encerra a conexão
+        con.send(str.encode('+OK Goodbye\n'))
+        return False, dir_trabalho
 
     else:
         con.send(str.encode('-ERR Invalid command\n'))
 
-    return True
+    return True, dir_trabalho
 
-def processa_cliente(con, cliente):
+def trata_cliente(con, cliente):
     """
-    Processa a conexão com um cliente individual, permitindo comandos do protocolo BTP.
+    Lida com a conexão de um cliente, processando os comandos.
     """
-    dir_trabalho = [os.getcwd()]  # Diretório de trabalho exclusivo para este cliente
-    print(f'Cliente conectado: {cliente}')
+    dir_trabalho = os.getcwd()  # Diretório inicial do cliente
+    print(f"Cliente conectado: {cliente}")
+
     while True:
         try:
             msg = con.recv(TAM_MSG)
-            if not msg or not processa_msg_cliente(msg, con, cliente, dir_trabalho):
+            if not msg:
+                break
+            continuar, dir_trabalho = processa_comando(msg, con, cliente, dir_trabalho)
+            if not continuar:
                 break
         except Exception as e:
-            print(f'Erro com o cliente {cliente}: {e}')
+            print(f"Erro com o cliente {cliente}: {e}")
             break
+
     con.close()
-    print(f'Cliente desconectado: {cliente}')
+    print(f"Cliente desconectado: {cliente}")
 
 def main():
     """
-    Inicializa o servidor BTP, permitindo múltiplas conexões simultâneas.
+    Inicia o servidor e gerencia conexões múltiplas usando multiprocessing.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    serv = (HOST, PORT)
-    sock.bind(serv)
+    sock.bind((HOST, PORT))
     sock.listen(50)
-    print(f"Servidor BTP escutando em {HOST}:{PORT}")
+    print(f"Servidor BTP rodando em {HOST}:{PORT}")
 
     while True:
         try:
             con, cliente = sock.accept()
             print(f"Nova conexão: {cliente}")
-            # Cria um processo para atender o cliente
-            p = Process(target=processa_cliente, args=(con, cliente))
+            # Processa cada cliente em um processo separado
+            p = Process(target=trata_cliente, args=(con, cliente))
             p.start()
         except KeyboardInterrupt:
             print("\nServidor encerrado.")
