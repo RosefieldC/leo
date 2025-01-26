@@ -7,15 +7,18 @@ TAM_MSG = 1024         # Tamanho do bloco de mensagem
 HOST = '0.0.0.0'       # IP de alguma interface do Servidor
 PORT = 40000           # Porta que o Servidor escuta
 
-def processa_msg_cliente(msg, con, cliente):
+def processa_msg_cliente(msg, con, cliente, dir_trabalho):
+    """
+    Processa uma mensagem recebida de um cliente, executando comandos do protocolo BTP.
+    """
     msg = msg.decode().strip()
-    print('Cliente', cliente, 'enviou:', msg)
+    print(f'Cliente {cliente} enviou: {msg}')
     msg = msg.split()
     comando = msg[0].upper()
 
-    if comando == 'GET':
-        nome_arq = " ".join(msg[1:])
-        print('Arquivo solicitado:', nome_arq)
+    if comando == 'GET':  # Solicita um arquivo
+        nome_arq = os.path.join(dir_trabalho, " ".join(msg[1:]))
+        print(f'Arquivo solicitado: {nome_arq}')
         try:
             status_arq = os.stat(nome_arq)
             con.send(str.encode(f'+OK {status_arq.st_size}\n'))
@@ -28,32 +31,31 @@ def processa_msg_cliente(msg, con, cliente):
         except Exception as e:
             con.send(str.encode(f'-ERR {e}\n'))
 
-    elif comando == 'LIST':
-        lista_arq = os.listdir('.')
+    elif comando == 'LIST':  # Lista arquivos no diretório atual
+        lista_arq = os.listdir(dir_trabalho)
         con.send(str.encode(f'+OK {len(lista_arq)}\n'))
         for nome_arq in lista_arq:
-            if os.path.isfile(nome_arq):
-                status_arq = os.stat(nome_arq)
+            caminho = os.path.join(dir_trabalho, nome_arq)
+            if os.path.isfile(caminho):
+                status_arq = os.stat(caminho)
                 con.send(str.encode(f'arq: {nome_arq} - {status_arq.st_size / 1024:.1f}KB\n'))
-            elif os.path.isdir(nome_arq):
+            elif os.path.isdir(caminho):
                 con.send(str.encode(f'dir: {nome_arq}\n'))
             else:
                 con.send(str.encode(f'esp: {nome_arq}\n'))
 
-    elif comando == 'CWD':
+    elif comando == 'CWD':  # Altera o diretório de trabalho (função do BTP)
         if len(msg) < 2:
             con.send(str.encode('-ERR Missing directory\n'))
         else:
-            novo_diretorio = " ".join(msg[1:])
-            try:
-                os.chdir(novo_diretorio)
+            novo_diretorio = os.path.join(dir_trabalho, " ".join(msg[1:]))
+            if os.path.isdir(novo_diretorio):
+                dir_trabalho[0] = novo_diretorio
                 con.send(str.encode(f'+OK Changed directory to {novo_diretorio}\n'))
-            except FileNotFoundError:
+            else:
                 con.send(str.encode(f'-ERR Directory not found: {novo_diretorio}\n'))
-            except Exception as e:
-                con.send(str.encode(f'-ERR {e}\n'))
 
-    elif comando == 'QUIT':
+    elif comando == 'QUIT':  # Encerra a conexão
         con.send(str.encode('+OK\n'))
         return False
 
@@ -63,24 +65,31 @@ def processa_msg_cliente(msg, con, cliente):
     return True
 
 def processa_cliente(con, cliente):
-    print('Cliente conectado:', cliente)
+    """
+    Processa a conexão com um cliente individual, permitindo comandos do protocolo BTP.
+    """
+    dir_trabalho = [os.getcwd()]  # Diretório de trabalho exclusivo para este cliente
+    print(f'Cliente conectado: {cliente}')
     while True:
         try:
             msg = con.recv(TAM_MSG)
-            if not msg or not processa_msg_cliente(msg, con, cliente):
+            if not msg or not processa_msg_cliente(msg, con, cliente, dir_trabalho):
                 break
         except Exception as e:
             print(f'Erro com o cliente {cliente}: {e}')
             break
     con.close()
-    print('Cliente desconectado:', cliente)
+    print(f'Cliente desconectado: {cliente}')
 
 def main():
+    """
+    Inicializa o servidor BTP, permitindo múltiplas conexões simultâneas.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     serv = (HOST, PORT)
     sock.bind(serv)
     sock.listen(50)
-    print(f"Servidor escutando em {HOST}:{PORT}")
+    print(f"Servidor BTP escutando em {HOST}:{PORT}")
 
     while True:
         try:
